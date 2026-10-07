@@ -3,7 +3,7 @@
   const $ = (s) => document.querySelector(s);
 
   // 게임이 직접 쓰는 세이브/설정 파일
-  const SAVE_FILES = ['AFRICA2.SAV', 'AFRICA2.CFG'];
+  const SAVE_FILES = ['AFRICA2.SAV'];
   // 낱개 파일로 넣을 때 꼭 있어야 하는 파일
   const REQUIRED = ['AFR2CD.EXE', 'AFR2CD.INI', 'DOS4GW.EXE', 'FONT.DAT', 'AFRPIC.DAT', 'ENGLISH.FNT',
     'HANGUL.FNT', 'KOR.OMF', 'TITLE.OMF', 'MUSIC.AD', 'MUSIC.ADV', 'MUSIC.COM', 'SOUND.COM', 'PANDA.CFG'];
@@ -16,7 +16,7 @@
     max: { label: '최대', cycles: 'max' },
   };
   const PERF_ORDER = ['normal', 'light', 'max'];
-  const prefs = Object.assign({ perf: 'normal', hideCursor: true, render: 'smooth', guideSeen: false, enterBar: true },
+  const prefs = Object.assign({ perf: 'normal', hideCursor: true, render: 'smooth', guideSeen: false, enterBar: true, remind: true },
     (() => { try { return JSON.parse(localStorage.getItem('africa2-prefs') || '{}'); } catch (_) { return {}; } })());
   const savePrefs = () => { try { localStorage.setItem('africa2-prefs', JSON.stringify(prefs)); } catch (_) { /* 무시 */ } };
 
@@ -29,6 +29,7 @@
   let wakeLock = null;
   let workingPath = null;
   let lastInput = 0;
+  let persistTried = false;
   let lastSyncAt = Date.now();
   let retryTimer = 0;
 
@@ -374,7 +375,90 @@
     $('#loading').hidden = true;
     clearInterval(syncTimer);
     syncTimer = setInterval(() => syncSaves(false), 30000);
-    if (prefs.guideSeen !== 2) $('#guide').hidden = false;
+    if (prefs.guideSeen !== 2 && !resumedAfterCrash) $('#guide').hidden = false;
+    startSession();
+    // 실행기에 넘겨준 게임 파일(약 50MB)을 이쪽 메모리에서 비운다. 실행기 안에는 이미 복사돼 있다.
+    setTimeout(releaseGameData, 4000);
+    if (resumedAfterCrash) {
+      const msg = lastEnd && lastEnd.vis === 'hidden'
+        ? '지난 게임이 끝나지 않은 채 닫혀서 바로 다시 열었어요. 게임 안의 불러오기로 이어서 하세요.'
+        : '앱이 갑자기 꺼져서 다시 열었어요. 게임 안의 불러오기로 이어서 하세요.';
+      setTimeout(() => toast(msg, 6000), 1500);
+    }
+  }
+
+  /* ───────── 메모리 줄이기 ─────────
+     아이폰은 웹앱이 메모리를 많이 쓰면 경고 없이 앱을 다시 시작시킨다(처음 화면으로 튕김).
+     게임 파일은 실행기 안에 복사본이 있으므로, 이쪽에 들고 있던 원본은 바로 놓아준다. */
+  function releaseGameData() {
+    if (!state.game || state.game.released) return;
+    const bufs = [];
+    if (state.game.kind === 'files') { for (const f of state.game.files) if (f.data && f.data.byteLength) bufs.push(f.data); }
+    else if (state.game.data && state.game.data.byteLength) bufs.push(state.game.data);
+    try {
+      // 버퍼를 '넘겨버리는' 방식으로 즉시 비운다(넘겨받은 쪽은 바로 버려짐)
+      if (bufs.length && typeof structuredClone === 'function') structuredClone(bufs, { transfer: bufs });
+    } catch (_) { /* 무시 */ }
+    state.game = { kind: state.game.kind, root: state.game.root, iso: state.game.iso, size: state.game.size, released: true };
+  }
+
+  /* ───────── 갑자기 꺼졌을 때 대비 ─────────
+     게임 중에는 10초마다 '살아 있음'을 적어둔다. 다음에 열 때 정상 종료 표시가 없으면 갑자기 꺼진 것. */
+  const SESSION_KEY = 'africa2-session';
+  const CRASH_KEY = 'africa2-crashes';
+  let session = null;
+  let beatTimer = 0;
+  let resumedAfterCrash = false;
+  let lastEnd = null;
+  let lastRemindAt = 0;
+  function writeSession() {
+    if (!session) return;
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify(session)); } catch (_) { /* 무시 */ }
+  }
+  function startSession() {
+    const now = Date.now();
+    session = { start: now, beat: now, lastSaveAt: now, vis: 'visible', clean: false };
+    writeSession();
+    lastRemindAt = now;
+    clearInterval(beatTimer);
+    beatTimer = setInterval(heartbeat, 10000);
+  }
+  function endSessionClean() {
+    if (session) { session.clean = true; writeSession(); }
+    clearInterval(beatTimer);
+  }
+  function heartbeat() {
+    if (!session) return;
+    const now = Date.now();
+    session.beat = now;
+    session.vis = document.hidden ? 'hidden' : 'visible';
+    writeSession();
+    // 저장 알림: 게임 안에서 10분 넘게 저장하지 않았으면 살짝 알려준다
+    if (prefs.remind && !document.hidden && $('#menu').hidden && now - session.lastSaveAt > 600000 && now - lastRemindAt > 600000) {
+      lastRemindAt = now;
+      const mins = Math.floor((now - session.lastSaveAt) / 60000);
+      toast(`마지막 저장 후 ${mins}분 지났어요. 게임 안에서 저장해두면 앱이 꺼져도 이어서 할 수 있어요.`, 5000);
+    }
+  }
+  function readCrashLog() {
+    try { return JSON.parse(localStorage.getItem(CRASH_KEY) || '[]'); } catch (_) { return []; }
+  }
+  // 앱을 열 때: 지난 게임이 정상 종료되지 않았는지 확인
+  function checkLastSession() {
+    let prev = null;
+    try { prev = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch (_) { /* 무시 */ }
+    try { localStorage.removeItem(SESSION_KEY); } catch (_) { /* 무시 */ }
+    if (!prev || prev.clean) return false;
+    lastEnd = prev;
+    // 화면을 보던 중에 끊긴 것만 '갑자기 꺼짐'으로 기록 (다른 앱으로 간 사이 닫힌 건 제외)
+    if (prev.vis !== 'hidden') {
+      const log = readCrashLog();
+      log.push({ at: prev.beat, mins: Math.round((prev.beat - prev.start) / 60000), perf: prefs.perf,
+        os: (navigator.userAgent.match(/OS [\d_]+/) || [''])[0] });
+      try { localStorage.setItem(CRASH_KEY, JSON.stringify(log.slice(-10))); } catch (_) { /* 무시 */ }
+    }
+    // 30분 안에 다시 열었으면 곧장 게임을 다시 띄운다
+    return Date.now() - prev.beat < 30 * 60000;
   }
 
   function loadingFail(msg) {
@@ -383,7 +467,7 @@
     l.innerHTML = '';
     const s = document.createElement('strong'); s.textContent = '시작하지 못했어요';
     const p = document.createElement('span'); p.textContent = msg;
-    const b = document.createElement('button'); b.className = 'btn primary'; b.textContent = '처음 화면으로';
+    const b = document.createElement('button'); b.className = 'ui-btn primary'; b.textContent = '처음 화면으로';
     b.addEventListener('click', () => location.reload());
     l.append(s, p, b);
   }
@@ -431,11 +515,14 @@
         found++;
         const h = hash(data);
         if (!state.saves.files[name] || state.saves.files[name].h !== h) {
+          const first = !state.saves.files[name];
           state.saves.files[name] = { h, data: data.slice().buffer };
           changed++;
+          if (!first && session) { session.lastSaveAt = Date.now(); writeSession(); }
         }
       }
-      if (!found && typeof ci.persist === 'function') {
+      if (!found && !persistTried && typeof ci.persist === 'function') {
+        persistTried = true;
         // 파일을 직접 못 읽는 경우: 바뀐 파일 묶음을 통째로 보관
         const z = await withTimeout(ci.persist(true), 10000);
         if (z && z.length > 22 && z.length < 20e6) {
@@ -759,9 +846,11 @@
     $('#m-cursor').textContent = '지팡이 커서: ' + (prefs.hideCursor ? '숨김' : '보이기');
     $('#m-render').textContent = '화면: ' + (prefs.render === 'smooth' ? '부드럽게' : '선명하게');
     $('#m-enter').textContent = '엔터 바: ' + (prefs.enterBar ? '보이기' : '숨김');
+    $('#m-remind').textContent = '저장 알림: ' + (prefs.remind ? '켬' : '끔');
     $('#bar-enter').hidden = !prefs.enterBar;
   }
   $('#m-enter').addEventListener('click', () => { prefs.enterBar = !prefs.enterBar; savePrefs(); renderMenuLabels(); });
+  $('#m-remind').addEventListener('click', () => { prefs.remind = !prefs.remind; savePrefs(); renderMenuLabels(); });
 
   // 돌린 화면에서도 똑바로 보이도록 기본 확인창 대신 직접 만든 확인창 사용
   function askConfirm(msg) {
@@ -780,6 +869,7 @@
     savePrefs();
     busy('세이브를 보관하고 다시 시작하는 중');
     await syncSaves(false, true);
+    endSessionClean();
     try { await withTimeout(Promise.resolve(dosProps && dosProps.stop && dosProps.stop()), 3000); } catch (_) { /* 무시 */ }
     try { sessionStorage.setItem('africa2-autostart', '1'); } catch (_) { /* 무시 */ }
     location.reload();
@@ -797,12 +887,14 @@
   $('#m-quit').addEventListener('click', async () => {
     busy('세이브를 보관하는 중');
     await syncSaves(false, true);
+    endSessionClean();
     try { await withTimeout(Promise.resolve(dosProps && dosProps.stop && dosProps.stop()), 3000); } catch (_) { /* 무시 */ }
     location.reload();
   });
   renderMenuLabels();
 
   document.addEventListener('visibilitychange', () => {
+    if (session) { session.vis = document.hidden ? 'hidden' : 'visible'; session.beat = Date.now(); writeSession(); }
     if (document.hidden) syncSaves(false, true);
     else if (!$('#play').hidden) requestWake();
   });
@@ -819,6 +911,10 @@
     if (has) parts.push(`게임 파일 ${Math.round(state.game.size / 1048576)}MB 보관 중.`);
     parts.push(state.saves.updated ? `마지막 세이브 보관: ${fmtTime(state.saves.updated)}` : '보관된 세이브는 아직 없어요.');
     $('#save-meta').textContent = parts.join(' ');
+    const log = readCrashLog();
+    const last = log[log.length - 1];
+    $('#crash-meta').hidden = !last;
+    if (last) $('#crash-meta').textContent = `최근 갑자기 꺼짐: ${fmtTime(last.at)}, 게임 ${last.mins}분째 (지금까지 ${log.length}번)`;
     $('#tip-home').hidden = !(isIOS() && !isStandalone());
   }
 
@@ -833,6 +929,9 @@
     renderLauncher();
     let auto = false;
     try { auto = sessionStorage.getItem('africa2-autostart') === '1'; sessionStorage.removeItem('africa2-autostart'); } catch (_) { /* 무시 */ }
+    const crashed = checkLastSession();
+    renderLauncher();
+    if (crashed && state.game) { resumedAfterCrash = true; auto = true; }
     if (auto && state.game) startGame();
   }
   init();
