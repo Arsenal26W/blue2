@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="아프리카 탐험2">
+<meta name="theme-color" content="#000000">
+<meta name="format-detection" content="telephone=no">
+<title>아프리카 탐험 2</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&display=swap">
+<link rel="stylesheet" href="https://v8.js-dos.com/latest/js-dos.css">
+<script src="https://v8.js-dos.com/latest/js-dos.js" defer onerror="window.__dosLoadFailed=true"></script>
+<style>
+  :root {
+    --sat: env(safe-area-inset-top, 0px);
+    --sar: env(safe-area-inset-right, 0px);
+    --sab: env(safe-area-inset-bottom, 0px);
+    --sal: env(safe-area-inset-left, 0px);
+
+    --ochre: #D9A441;
+    --dune: #C48A2E;
+    --acacia: #2E3A1F;
+    --bone: #F3E9D2;
+    --ink: #20160C;
+    --ember: #8E2A12;
+
+    --display: "Black Han Sans", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+    --body: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #000; color: var(--ink);
+    font-family: var(--body);
+    overscroll-behavior: none;
+    -webkit-text-size-adjust: 100%;
+  }
+  body { position: fixed; inset: 0; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  button, .key { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: manipulation; }
+  [hidden] { display: none !important; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  :focus-visible { outline: 3px solid var(--bone); outline-offset: 3px; }
+
+  /* ───────── 시작 화면 ───────── */
+  #launcher {
+    position: fixed; inset: 0;
+    background: var(--ochre);
+    padding: calc(var(--sat) + 20px) calc(var(--sar) + 24px) calc(var(--sab) + 20px) calc(var(--sal) + 24px);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 28px;
+    overflow-y: auto;
+  }
+  #launcher::after {
+    content: ""; position: fixed; left: -20%; right: -20%; bottom: -55vh; height: 75vh;
+    background: var(--dune); border-radius: 50%; pointer-events: none;
+  }
+  .mark, .panel { position: relative; z-index: 1; }
+  .mark { display: grid; grid-template-columns: auto auto; align-items: end; justify-content: center; column-gap: 18px; }
+  .mark h1 {
+    margin: 0; font-family: var(--display); font-weight: 400;
+    font-size: clamp(44px, 13vh, 96px); line-height: .98; letter-spacing: -.01em; color: var(--ink);
+  }
+  .die {
+    width: clamp(64px, 19vh, 132px); aspect-ratio: 1; margin-bottom: .08em;
+    background: var(--bone); border-radius: 20%; position: relative; transform: rotate(-9deg);
+    box-shadow: 0 6px 0 var(--dune);
+  }
+  .die i { position: absolute; width: 22%; aspect-ratio: 1; border-radius: 50%; background: var(--ink); }
+  .die i:first-child { left: 17%; top: 17%; }
+  .die i:last-child { right: 17%; bottom: 17%; }
+  .by { grid-column: 1 / -1; margin: 14px 0 0; font-size: 13px; line-height: 1.5; color: rgba(32,22,12,.72); }
+
+  .panel { max-width: 380px; width: 100%; justify-self: center; }
+  .lead { margin: 0 0 14px; font-size: 16px; line-height: 1.5; font-weight: 600; }
+  .hint, .meta { margin: 12px 0 0; font-size: 13px; line-height: 1.55; color: rgba(32,22,12,.78); }
+  .btn {
+    display: block; width: 100%; border: 0; border-radius: 14px; padding: 15px 18px;
+    font-family: var(--display); font-size: 21px; letter-spacing: .01em;
+  }
+  .btn.primary { background: var(--acacia); color: var(--bone); box-shadow: 0 4px 0 #1a2211; }
+  .btn.primary:active { transform: translateY(3px); box-shadow: 0 1px 0 #1a2211; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+  .btn.line { background: transparent; border: 2px solid var(--ink); font-family: var(--body); font-weight: 700; font-size: 14px; padding: 11px 10px; }
+  .btn.line:active { background: rgba(32,22,12,.12); }
+  .btn.text { background: none; padding: 10px 0 0; font-family: var(--body); font-size: 13px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; text-align: left; width: auto; }
+  .tip { margin: 16px 0 0; padding: 12px 14px; border-radius: 12px; background: rgba(243,233,210,.55); font-size: 13px; line-height: 1.55; }
+  .error { margin: 12px 0 0; font-size: 14px; line-height: 1.5; font-weight: 700; color: var(--ember); }
+
+  @media (orientation: portrait) {
+    #launcher { grid-template-columns: 1fr; align-content: center; gap: 36px; }
+    .mark h1 { font-size: clamp(52px, 15vw, 88px); }
+    .die { width: clamp(72px, 22vw, 120px); }
+  }
+
+  /* ───────── 게임 화면 ───────── */
+  #play { position: fixed; inset: 0; background: #000; }
+  #stage {
+    position: absolute;
+    top: var(--sat); right: var(--sar); bottom: var(--sab); left: var(--sal);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    grid-template-areas: "left game right";
+    align-items: center; justify-items: center;
+  }
+  #stage.portrait {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto auto;
+    grid-template-areas: "game game" "left right" "hint hint";
+    align-content: center; row-gap: 18px;
+  }
+  #game { grid-area: game; position: relative; background: #000; touch-action: none; overflow: hidden; }
+  #dos { position: absolute; inset: 0; }
+  #loading {
+    position: absolute; inset: 0; z-index: 50; display: grid; place-content: center; gap: 10px; text-align: center;
+    background: #000; color: var(--bone); font-size: 15px; line-height: 1.5; padding: 20px;
+  }
+  #loading strong { font-family: var(--display); font-weight: 400; font-size: 22px; }
+  #loading .btn { margin-top: 8px; font-size: 17px; }
+
+  .side { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
+  .side.left { grid-area: left; }
+  .side.right { grid-area: right; }
+  #stage.portrait { column-gap: 12px; }
+  #stage.portrait .side { flex-direction: row; gap: 10px; }
+  #stage.portrait .side.left { justify-self: end; }
+  #stage.portrait .side.right { justify-self: start; }
+  #stage.portrait .key { width: 52px; height: 52px; font-size: 13px; }
+  #rotate-hint { display: none; grid-column: 1 / -1; margin: 0; color: rgba(243,233,210,.6); font-size: 13px; text-align: center; }
+  #stage.portrait #rotate-hint { display: block; }
+  .key {
+    width: 58px; height: 58px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: rgba(243,233,210,.08); border: 1.5px solid rgba(243,233,210,.32);
+    color: var(--bone); font-family: var(--display); font-size: 15px; line-height: 1;
+  }
+  .key:active, .key.on { background: rgba(243,233,210,.28); }
+  @media (max-height: 340px) { .key { width: 50px; height: 50px; font-size: 13px; } .side { gap: 9px; } }
+
+  #kbd { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; }
+
+  /* 메뉴 */
+  #menu {
+    position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.55); display: grid; place-items: center;
+    padding: calc(var(--sat) + 12px) calc(var(--sar) + 12px) calc(var(--sab) + 12px) calc(var(--sal) + 12px);
+  }
+  .sheet {
+    width: min(340px, 100%); background: var(--bone); border-radius: 18px; padding: 18px;
+    display: grid; gap: 10px; max-height: calc(100% - var(--sat) - var(--sab)); overflow-y: auto;
+  }
+  .sheet h2 { margin: 2px 0 4px; font-family: var(--display); font-weight: 400; font-size: 22px; }
+  .sheet .note { margin: 0; font-size: 12.5px; line-height: 1.5; color: rgba(32,22,12,.75); }
+  @media (orientation: landscape) and (max-height: 500px) {
+    .sheet { width: min(540px, 100%); grid-template-columns: 1fr 1fr; gap: 9px; padding: 16px; }
+    .sheet h2, .sheet .note, .sheet .btn.primary { grid-column: 1 / -1; }
+    .sheet .btn.line { padding: 10px 8px; }
+    .sheet .btn.primary { font-size: 18px; padding: 11px; }
+  }
+
+  /* 알림 */
+  #toast {
+    position: fixed; z-index: 200; left: 50%; bottom: calc(var(--sab) + 18px); transform: translate(-50%, 20px);
+    max-width: calc(100% - 40px); padding: 11px 16px; border-radius: 12px;
+    background: var(--bone); color: var(--ink); font-size: 14px; font-weight: 700; line-height: 1.4;
+    box-shadow: 0 6px 20px rgba(0,0,0,.35); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  #busy { position: fixed; inset: 0; z-index: 300; background: rgba(32,22,12,.6); color: var(--bone); display: grid; place-content: center; text-align: center; font-family: var(--display); font-size: 22px; }
+
+  @media (prefers-reduced-motion: reduce) { #toast { transition: none; } .btn.primary:active { transform: none; } }
+</style>
+</head>
+<body>
+
+<main id="launcher">
+  <section class="mark">
+    <h1>아프리카<br>탐험<span class="sr"> 2</span></h1>
+    <div class="die" aria-hidden="true"><i></i><i></i></div>
+    <p class="by">1996년 판다 엔터테인먼트, 1998년 한글판</p>
+  </section>
+
+  <section class="panel">
+    <div id="state-empty" hidden>
+      <p class="lead">처음 한 번만 게임 파일을 넣어주세요.</p>
+      <button class="btn primary" id="btn-pick">게임 파일 넣기</button>
+      <p class="hint">africa2-game.zip 하나를 고르거나, 게임 폴더의 파일을 전부 골라주세요. CD 이미지(.iso)도 꼭 함께 골라야 해요.</p>
+    </div>
+
+    <div id="state-ready" hidden>
+      <button class="btn primary" id="btn-start">게임 시작</button>
+      <p class="meta" id="save-meta"></p>
+      <div class="row">
+        <button class="btn line" id="btn-export">세이브 내보내기</button>
+        <button class="btn line" id="btn-import">세이브 가져오기</button>
+      </div>
+      <button class="btn text" id="btn-repick">게임 파일 다시 넣기</button>
+    </div>
+
+    <p class="error" id="error" role="alert" hidden></p>
+    <p class="tip" id="tip-home" hidden>Safari 아래쪽 공유 버튼에서 ‘홈 화면에 추가’를 누른 뒤, 홈 화면 아이콘으로 열어주세요. 화면을 꽉 채우고 세이브도 안전하게 보관돼요. 홈 화면 앱은 Safari와 저장 공간이 따로라서, 게임 파일은 홈 화면 앱에서 넣어야 해요.</p>
+  </section>
+</main>
+
+<div id="play" hidden>
+  <div id="stage">
+    <div class="side left">
+      <button class="key" data-key="esc" aria-label="ESC 키">ESC</button>
+      <button class="key" data-key="enter" aria-label="엔터 키">엔터</button>
+      <button class="key" data-key="space" aria-label="스페이스 키">공백</button>
+    </div>
+    <div id="game">
+      <div id="dos"></div>
+      <div id="loading"><strong>불러오는 중</strong><span id="loading-msg">잠시만 기다려주세요.</span></div>
+    </div>
+    <div class="side right">
+      <button class="key" id="btn-kbd" aria-label="키보드 열기">자판</button>
+      <button class="key" id="btn-sync" aria-label="세이브 보관하기">보관</button>
+      <button class="key" id="btn-menu" aria-label="메뉴 열기">메뉴</button>
+    </div>
+    <p id="rotate-hint">가로로 돌리면 화면이 더 커져요</p>
+  </div>
+  <input id="kbd" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-hidden="true" tabindex="-1">
+</div>
+
+<div id="menu" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="menu-title">
+    <h2 id="menu-title">메뉴</h2>
+    <button class="btn line" id="m-export">세이브 내보내기</button>
+    <button class="btn line" id="m-touch">터치 방식: 직접 누르기</button>
+    <button class="btn line" id="m-render">화면: 부드럽게</button>
+    <button class="btn line" id="m-quit">처음 화면으로</button>
+    <button class="btn primary" id="m-close">게임으로 돌아가기</button>
+    <p class="note">게임 안에서 저장하면 10초 안에 아이폰에 자동으로 보관돼요. ‘보관’ 버튼을 누르면 바로 보관해요.</p>
+  </div>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="busy" hidden></div>
+<input type="file" id="pick-game" multiple hidden>
+<input type="file" id="pick-save" hidden>
+
+<script src="app.js"></script>
+</body>
+</html>
