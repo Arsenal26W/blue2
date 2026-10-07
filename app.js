@@ -514,8 +514,21 @@
     const side = Math.max(now.t, now.b, now.l, now.r);
     return { t: 0, r: side, b: now.b > 0 ? 21 : 0, l: side };
   }
+  // 홈 화면 앱은 화면 전체를 쓰는데, 세로일 때 아이폰이 높이를 상태 표시줄만큼 작게 알려주는 경우가 있어
+  // 홈 화면 앱에서는 기기 화면 크기를 직접 쓴다.
+  function viewportSize() {
+    const iw = window.innerWidth, ih = window.innerHeight;
+    const portrait = ih > iw;
+    const sw = screen.width, sh = screen.height;
+    if (isStandalone() && sw && sh) {
+      const a = Math.min(sw, sh), b = Math.max(sw, sh);
+      // 화면 크기와 창 크기가 크게 다르면(아이패드 분할 화면 등) 창 크기를 믿는다
+      if (Math.abs(Math.min(iw, ih) - a) <= 2 && Math.max(iw, ih) <= b + 2) return portrait ? { W: a, H: b } : { W: b, H: a };
+    }
+    return { W: iw, H: ih };
+  }
   function applyOrientation() {
-    const W = window.innerWidth, H = window.innerHeight;
+    const { W, H } = viewportSize();
     rotated = H > W;
     appEl.classList.toggle('rotated', rotated);
     appEl.style.width = (rotated ? H : W) + 'px';
@@ -529,6 +542,14 @@
     appEl.style.setProperty('--pl', side + 'px');
     appEl.style.setProperty('--pr', side + 'px');
   }
+
+  const dosEl = $('#dos');
+  const origRect = Element.prototype.getBoundingClientRect;
+  Element.prototype.getBoundingClientRect = function () {
+    const r = origRect.call(this);
+    if (!rotated || !dosEl.contains(this) || !(this.offsetWidth || this.offsetHeight)) return r;
+    return new DOMRect(r.x, r.y, this.offsetWidth, this.offsetHeight);
+  };
 
   /* ───────── 화면 맞춤 (4:3, 안전 영역 안쪽) ───────── */
   const LEFT_MIN = 132;  // 방향키·스페이스·엔터 칸
