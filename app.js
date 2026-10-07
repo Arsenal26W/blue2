@@ -9,6 +9,16 @@
     'HANGUL.FNT', 'KOR.OMF', 'TITLE.OMF', 'MUSIC.AD', 'MUSIC.ADV', 'MUSIC.COM', 'SOUND.COM', 'PANDA.CFG'];
   const SKIP = /\.PIF$|^RETROMON\./;
   const KEY = { esc: 256, enter: 257, space: 32, backspace: 259, tab: 258, up: 265, down: 264, left: 263, right: 262, shift: 340 };
+  // 성능 단계: 에뮬레이터가 한 번에 돌리는 CPU 양
+  const PERF = {
+    light: { label: '가볍게', cycles: 'fixed 20000' },
+    normal: { label: '보통', cycles: 'fixed 40000' },
+    max: { label: '최대', cycles: 'max' },
+  };
+  const PERF_ORDER = ['normal', 'light', 'max'];
+  const prefs = Object.assign({ perf: 'normal', hideCursor: true, render: 'smooth', guideSeen: false, dpad: false },
+    (() => { try { return JSON.parse(localStorage.getItem('africa2-prefs') || '{}'); } catch (_) { return {}; } })());
+  const savePrefs = () => { try { localStorage.setItem('africa2-prefs', JSON.stringify(prefs)); } catch (_) { /* 무시 */ } };
 
   const state = { game: null, saves: { files: {}, zip: null, updated: 0 } };
   let dosProps = null;
@@ -17,9 +27,10 @@
   let syncing = false;
   let watchdog = 0;
   let wakeLock = null;
-  let touchMode = 'direct';
-  let renderMode = 'smooth';
   let workingPath = null;
+  let lastInput = 0;
+  let lastSyncAt = Date.now();
+  let retryTimer = 0;
 
   /* ───────── 개발용: ?insets=위,오른쪽,아래,왼쪽 으로 안전 영역 흉내 ───────── */
   const qs = new URLSearchParams(location.search);
@@ -102,16 +113,57 @@
     if (eocd < 0) throw new Error('zip 파일을 읽지 못했어요. 파일이 손상됐을 수 있어요.');
     const count = dv.getUint16(eocd + 10, true);
     let p = dv.getUint32(eocd + 16, true);
-    const names = [];
+    const entries = [];
     const utf8 = new TextDecoder('utf-8');
     for (let n = 0; n < count && p + 46 <= u8.length; n++) {
       if (dv.getUint32(p, true) !== 0x02014b50) break;
       const nl = dv.getUint16(p + 28, true), el = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true);
-      names.push(utf8.decode(u8.subarray(p + 46, p + 46 + nl)));
+      entries.push({
+        name: utf8.decode(u8.subarray(p + 46, p + 46 + nl)),
+        method: dv.getUint16(p + 10, true),
+        csize: dv.getUint32(p + 20, true),
+        local: dv.getUint32(p + 42, true),
+      });
       p += 46 + nl + el + cl;
     }
-    return names;
+    return entries;
   }
+
+  // zip을 낱개 파일로 풀기 (아이폰 기본 기능 사용)
+  async function inflateRaw(u8) {
+    const stream = new Blob([u8]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+  async function unzipGame(buf) {
+    const u8 = new Uint8Array(buf);
+    const dv = new DataView(buf);
+    const entries = zipNames(u8);
+    const info = analyzeZip(entries.map((e) => e.name));
+    const files = [];
+    let size = 0;
+    for (const e of entries) {
+      if (e.name.endsWith('/')) continue;
+      if (!e.name.toLowerCase().startsWith(info.root.toLowerCase())) continue;
+      const rel = e.name.slice(info.root.length);
+      if (rel.includes('/')) continue; // 하위 폴더는 게임에 필요 없음
+      const upper = rel.toUpperCase();
+      if (SKIP.test(upper)) continue;
+      const isIso = e.name === info.iso;
+      if (/\.ISO$/.test(upper) && !isIso) continue;
+      const lo = e.local;
+      if (dv.getUint32(lo, true) !== 0x04034b50) throw new Error('zip 파일 구조가 이상해요.');
+      const start = lo + 30 + dv.getUint16(lo + 26, true) + dv.getUint16(lo + 28, true);
+      const raw = u8.subarray(start, start + e.csize);
+      let data;
+      if (e.method === 0) data = raw.slice();
+      else if (e.method === 8) data = await inflateRaw(raw);
+      else throw new Error('지원하지 않는 압축 방식이에요. 일반 zip으로 다시 압축해주세요.');
+      size += data.byteLength;
+      files.push({ name: isIso ? 'CD.ISO' : upper, data: data.buffer });
+    }
+    return { kind: 'files', files, root: '', iso: 'CD.ISO', size };
+  }
+  const canUnzip = () => typeof DecompressionStream === 'function';
   function analyzeZip(names) {
     const exe = names.find((n) => /(^|\/)AFR2CD\.EXE$/i.test(n));
     if (!exe) throw new Error('zip 안에 AFR2CD.EXE가 없어요. 게임 폴더를 통째로 압축했는지 확인해주세요.');
@@ -132,8 +184,13 @@
       let rec;
       if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
         const buf = await files[0].arrayBuffer();
-        const info = analyzeZip(zipNames(new Uint8Array(buf)));
-        rec = { kind: 'zip', data: buf, root: info.root, iso: info.iso, size: buf.byteLength };
+        if (canUnzip()) {
+          busy('게임 파일을 푸는 중');
+          rec = await unzipGame(buf);
+        } else {
+          const info = analyzeZip(zipNames(new Uint8Array(buf)).map((e) => e.name));
+          rec = { kind: 'zip', data: buf, root: info.root, iso: info.iso, size: buf.byteLength };
+        }
       } else {
         const byName = new Map();
         let iso = null;
@@ -179,8 +236,8 @@
     return [
       '[sdl]', 'autolock=false', 'fullscreen=false', '',
       '[dosbox]', 'machine=svga_s3', 'memsize=16', '',
-      '[cpu]', 'core=auto', 'cputype=auto', 'cycles=max', '',
-      '[render]', 'aspect=false', 'scaler=none', '',
+      '[cpu]', 'core=auto', 'cputype=auto', `cycles=${(PERF[prefs.perf] || PERF.normal).cycles}`, 'cycleup=2000', 'cycledown=2000', '',
+      '[render]', 'frameskip=0', 'aspect=false', 'scaler=none', '',
       '[mixer]', 'nosound=false', 'rate=44100', 'blocksize=1024', 'prebuffer=40', '',
       '[sblaster]', 'sbtype=sb16', 'sbbase=220', 'irq=7', 'dma=1', 'hdma=5', 'oplmode=auto', 'oplrate=44100', '',
       '[speaker]', 'pcspeaker=false', '',
@@ -198,10 +255,53 @@
     ].join('\n');
   }
 
+  // CD 이미지(ISO9660) 안에서 파일 위치 찾기
+  function isoFind(u8, parts) {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const pvd = 16 * 2048;
+    if (u8.length < pvd + 2048 || String.fromCharCode(...u8.subarray(pvd + 1, pvd + 6)) !== 'CD001') return null;
+    let lba = dv.getUint32(pvd + 158, true), size = dv.getUint32(pvd + 166, true);
+    for (let depth = 0; depth < parts.length; depth++) {
+      let p = lba * 2048;
+      const end = Math.min(p + size, u8.length);
+      let found = null;
+      while (p < end) {
+        const len = u8[p];
+        if (len === 0) { p = (Math.floor(p / 2048) + 1) * 2048; continue; }
+        const nl = u8[p + 32];
+        let name = String.fromCharCode(...u8.subarray(p + 33, p + 33 + nl)).split(';')[0].toUpperCase();
+        if (name.endsWith('.')) name = name.slice(0, -1);
+        if (name === parts[depth]) { found = { lba: dv.getUint32(p + 2, true), size: dv.getUint32(p + 10, true) }; break; }
+        p += len;
+      }
+      if (!found) return null;
+      lba = found.lba; size = found.size;
+    }
+    return { offset: lba * 2048, size };
+  }
+  // CURSOR.PAK의 첫 번째 그림(지팡이)을 투명(0)으로 칠하기. 메모리에서만 바꾸고 원본은 그대로.
+  function hideWandCursor(iso) {
+    try {
+      const f = isoFind(iso, ['AFR2CD', 'CURSOR.PAK']);
+      if (!f || f.offset + f.size > iso.length) return false;
+      const dv = new DataView(iso.buffer, iso.byteOffset + f.offset, f.size);
+      const a = dv.getUint32(0, true), b = dv.getUint32(4, true);
+      if (a !== 36 || b <= a || b > f.size) return false;
+      iso.fill(0, f.offset + a, f.offset + b);
+      return true;
+    } catch (_) { return false; }
+  }
+
   function buildInitFs(game, saves) {
     const fs = [];
     if (game.kind === 'zip') fs.push(new Uint8Array(game.data));
-    else for (const f of game.files) fs.push({ path: f.name, contents: new Uint8Array(f.data) });
+    else {
+      for (const f of game.files) {
+        const contents = new Uint8Array(f.data);
+        if (f.name === 'CD.ISO' && prefs.hideCursor) hideWandCursor(contents);
+        fs.push({ path: f.name, contents });
+      }
+    }
     if (saves.zip && saves.zip.data) fs.push(new Uint8Array(saves.zip.data));
     const base = game.root || '';
     for (const [name, rec] of Object.entries(saves.files || {})) {
@@ -228,6 +328,14 @@
       return;
     }
 
+    if (state.game.kind === 'zip' && canUnzip()) {
+      $('#loading-msg').textContent = '처음 한 번만 게임 파일을 정리하는 중이에요.';
+      try {
+        const rec = await unzipGame(state.game.data);
+        await idbSet('game', rec);
+        state.game = rec;
+      } catch (_) { /* 실패하면 zip 그대로 실행 */ }
+    }
     $('#loading-msg').textContent = '게임 파일을 준비하는 중이에요.';
     await sleep(30);
     let initFs;
@@ -251,7 +359,7 @@
         noNetworking: true,
         theme: 'dark',
         renderAspect: '4/3',
-        imageRendering: renderMode,
+        imageRendering: prefs.render,
         mouseCapture: false,
         onEvent: (ev, arg) => { if (ev === 'ci-ready') onCiReady(arg); },
       });
@@ -265,8 +373,8 @@
     clearTimeout(watchdog);
     $('#loading').hidden = true;
     clearInterval(syncTimer);
-    syncTimer = setInterval(() => syncSaves(false), 10000);
-    setTimeout(() => syncSaves(false), 5000);
+    syncTimer = setInterval(() => syncSaves(false), 30000);
+    if (prefs.guideSeen !== 2) $('#guide').hidden = false;
   }
 
   function loadingFail(msg) {
@@ -306,8 +414,14 @@
     return null;
   }
 
-  async function syncSaves(manual) {
+  async function syncSaves(manual, force) {
     if (!ci || syncing) { if (manual && !ci) toast('게임이 아직 시작되지 않았어요'); return; }
+    // 손가락으로 조작하는 중이면 잠깐 미뤄서 화면이 걸리지 않게 (단, 2분 넘게 미루지는 않음)
+    if (!manual && !force && Date.now() - lastInput < 4000 && Date.now() - lastSyncAt < 120000) {
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => syncSaves(false), 5000);
+      return;
+    }
     syncing = true;
     let changed = 0, found = 0;
     try {
@@ -330,6 +444,7 @@
           if (!state.saves.zip || state.saves.zip.h !== h) { state.saves.zip = { h, data: z.slice().buffer }; changed++; }
         }
       }
+      lastSyncAt = Date.now();
       if (changed) {
         state.saves.updated = Date.now();
         await idbSet('saves', state.saves);
@@ -410,13 +525,14 @@
   /* ───────── 키 입력 ───────── */
   function press(code, withShift) {
     if (!ci) return;
+    lastInput = Date.now();
     try {
       if (typeof ci.simulateKeyPress === 'function') {
         if (withShift) ci.simulateKeyPress(KEY.shift, code); else ci.simulateKeyPress(code);
       } else if (typeof ci.sendKeyEvent === 'function') {
         if (withShift) ci.sendKeyEvent(KEY.shift, true);
         ci.sendKeyEvent(code, true);
-        setTimeout(() => { ci.sendKeyEvent(code, false); if (withShift) ci.sendKeyEvent(KEY.shift, false); }, 70);
+        setTimeout(() => { ci.sendKeyEvent(code, false); if (withShift) ci.sendKeyEvent(KEY.shift, false); }, 80);
       }
     } catch (_) { /* 무시 */ }
   }
@@ -426,8 +542,7 @@
     if (charBusy) return;
     charBusy = true;
     while (charQueue.length) {
-      const ch = charQueue.shift();
-      const m = charToKey(ch);
+      const m = charToKey(charQueue.shift());
       if (m) press(m.code, m.shift);
       await sleep(60);
     }
@@ -441,18 +556,19 @@
     return map[ch] !== undefined ? { code: map[ch] } : null;
   }
 
+  function wakeAudio() {
+    const list = window.__audioCtxs || [];
+    for (const c of list) { try { if (c.state !== 'running') c.resume(); } catch (_) { /* 무시 */ } }
+  }
+
   document.querySelectorAll('.key[data-key]').forEach((b) => {
-    b.addEventListener('pointerdown', (e) => { e.preventDefault(); b.classList.add('on'); press(KEY[b.dataset.key]); });
+    b.addEventListener('pointerdown', (e) => { e.preventDefault(); wakeAudio(); b.classList.add('on'); press(KEY[b.dataset.key]); });
     const off = () => b.classList.remove('on');
     b.addEventListener('pointerup', off); b.addEventListener('pointercancel', off); b.addEventListener('pointerleave', off);
   });
 
   const kbd = $('#kbd');
-  $('#btn-kbd').addEventListener('click', () => {
-    if (document.activeElement === kbd) { kbd.blur(); $('#btn-kbd').classList.remove('on'); }
-    else { kbd.value = ''; kbd.focus(); $('#btn-kbd').classList.add('on'); }
-  });
-  kbd.addEventListener('blur', () => $('#btn-kbd').classList.remove('on'));
+  function openKeyboard() { kbd.value = ''; kbd.focus(); }
   kbd.addEventListener('keydown', (e) => {
     const special = { Enter: KEY.enter, Backspace: KEY.backspace, Escape: KEY.esc, Tab: KEY.tab,
       ArrowUp: KEY.up, ArrowDown: KEY.down, ArrowLeft: KEY.left, ArrowRight: KEY.right };
@@ -464,6 +580,151 @@
     pumpChars();
   });
 
+  /* ───────── 진동(햅틱) ─────────
+     아이폰 Safari에는 진동 기능이 따로 없어서, iOS 18부터 생긴 '스위치' 체크박스를 눌렀을 때의 진동을 빌려 쓴다. */
+  function haptic() {
+    try { if (typeof navigator.vibrate === 'function' && navigator.vibrate(10)) return; } catch (_) { /* 무시 */ }
+    try {
+      const label = document.createElement('label');
+      label.setAttribute('aria-hidden', 'true');
+      label.style.display = 'none';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.setAttribute('switch', '');
+      label.appendChild(input);
+      document.head.appendChild(label);
+      label.click();
+      document.head.removeChild(label);
+    } catch (_) { /* 무시 */ }
+  }
+
+  /* ───────── 터치 → 마우스 ─────────
+     톡: 그 자리로 커서를 옮겨 잠깐 머문 뒤 클릭 (게임이 위치를 먼저 알아채도록)
+     누른 채 끌기: 커서가 손가락을 따라가고, 손을 뗀 곳을 클릭
+     꾹: 스페이스(선택) + 진동 / 두 손가락 톡: ESC */
+  const pad = $('#pad');
+  const game = $('#game');
+  const TAP_SLOP = 14;     // 이만큼 넘게 움직이면 '끌기'
+  const HOLD_MS = 450;     // 꾹 누르기 판정 시간
+  const HOVER_MS = 120;    // 클릭 전에 커서를 그 자리에 머물게 하는 시간
+  const CLICK_HOLD = 120;  // 게임이 클릭을 놓치지 않도록 버튼을 누르고 있는 시간
+  const pointers = new Map();
+  let gesture = null;
+  let clickChain = Promise.resolve();
+  let lastMoveAt = 0;
+  let movedAt = 0;
+
+  function normPos(cx, cy) {
+    const r = game.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (cx - r.left) / r.width)),
+      y: Math.min(1, Math.max(0, (cy - r.top) / r.height)),
+      px: cx - r.left, py: cy - r.top,
+    };
+  }
+  function moveMouse(p) {
+    try {
+      if (ci && ci.sendMouseMotion) { ci.sendMouseMotion(p.x, p.y); movedAt = performance.now(); }
+    } catch (_) { /* 무시 */ }
+  }
+  function click(p, alreadyThere) {
+    // 손가락을 댄 순간부터 커서가 이미 그 자리에 있었다면, 그동안 머문 시간만큼은 덜 기다림
+    const hovered = alreadyThere ? performance.now() - movedAt : 0;
+    clickChain = clickChain.then(async () => {
+      if (!ci || typeof ci.sendMouseButton !== 'function') return;
+      moveMouse(p);
+      await sleep(Math.max(40, HOVER_MS - hovered));
+      moveMouse(p);
+      ci.sendMouseButton(0, true);
+      await sleep(CLICK_HOLD);
+      ci.sendMouseButton(0, false);
+      await sleep(30);
+    }).catch(() => {});
+  }
+  function mark(p, kind) {
+    const d = document.createElement('div');
+    d.className = 'ripple' + (kind ? ' ' + kind : '');
+    d.style.left = p.px + 'px'; d.style.top = p.py + 'px';
+    game.appendChild(d);
+    setTimeout(() => d.remove(), 420);
+  }
+
+  pad.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    wakeAudio();
+    lastInput = Date.now();
+    try { pad.setPointerCapture(e.pointerId); } catch (_) { /* 무시 */ }
+    pointers.set(e.pointerId, true);
+    if (!ci) return;
+    if (pointers.size >= 2) {
+      if (gesture) { clearTimeout(gesture.holdTimer); gesture.multi = true; }
+      return;
+    }
+    const p = normPos(e.clientX, e.clientY);
+    gesture = { id: e.pointerId, start: p, last: p, sx: e.clientX, sy: e.clientY,
+      dragging: false, done: false, multi: false, t0: performance.now() };
+    moveMouse(p);
+    gesture.holdTimer = setTimeout(() => {
+      if (gesture && !gesture.dragging && !gesture.multi && !gesture.done) {
+        gesture.done = true;
+        haptic();
+        press(KEY.space);
+        mark(gesture.start, 'hold');
+      }
+    }, HOLD_MS);
+  });
+
+  pad.addEventListener('pointermove', (e) => {
+    if (!gesture || e.pointerId !== gesture.id || gesture.multi || gesture.done) return;
+    lastInput = Date.now();
+    if (!gesture.dragging && Math.hypot(e.clientX - gesture.sx, e.clientY - gesture.sy) > TAP_SLOP) {
+      gesture.dragging = true;
+      clearTimeout(gesture.holdTimer);
+    }
+    if (!gesture.dragging) return;
+    gesture.last = normPos(e.clientX, e.clientY);
+    const now = performance.now();
+    if (now - lastMoveAt > 30) { lastMoveAt = now; moveMouse(gesture.last); }
+  });
+
+  function endPointer(e, cancelled) {
+    const wasMulti = pointers.size >= 2;
+    pointers.delete(e.pointerId);
+    if (!gesture) return;
+    if (gesture.multi) {
+      if (pointers.size === 0) {
+        if (!cancelled && performance.now() - gesture.t0 < 600) { press(KEY.esc); mark(gesture.start, 'hold'); }
+        gesture = null;
+      }
+      return;
+    }
+    if (e.pointerId !== gesture.id) return;
+    clearTimeout(gesture.holdTimer);
+    if (!cancelled && !wasMulti && !gesture.done) {
+      const target = gesture.dragging ? normPos(e.clientX, e.clientY) : gesture.start;
+      click(target, !gesture.dragging);
+      mark(target);
+    }
+    gesture = null;
+  }
+  pad.addEventListener('pointerup', (e) => endPointer(e, false));
+  pad.addEventListener('pointercancel', (e) => endPointer(e, true));
+  pad.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  /* ───────── 방향키 버튼 (메뉴에서 켜는 예비용) ───────── */
+  document.querySelectorAll('.dpad [data-arrow]').forEach((b) => {
+    let rep = 0, first = 0;
+    const stop = () => { clearTimeout(first); clearInterval(rep); b.classList.remove('on'); };
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); wakeAudio();
+      b.classList.add('on');
+      const code = KEY[b.dataset.arrow];
+      press(code);
+      first = setTimeout(() => { rep = setInterval(() => press(code), 140); }, 380);
+    });
+    b.addEventListener('pointerup', stop); b.addEventListener('pointercancel', stop); b.addEventListener('pointerleave', stop);
+  });
+
   /* ───────── 버튼 연결 ───────── */
   $('#btn-pick').addEventListener('click', () => $('#pick-game').click());
   $('#btn-repick').addEventListener('click', () => $('#pick-game').click());
@@ -473,34 +734,63 @@
   $('#btn-import').addEventListener('click', () => $('#pick-save').click());
   $('#pick-save').addEventListener('change', (e) => { importSave(e.target.files[0]); e.target.value = ''; });
 
-  $('#btn-sync').addEventListener('click', () => syncSaves(true));
-  $('#btn-menu').addEventListener('click', () => { kbd.blur(); $('#menu').hidden = false; });
-  $('#m-close').addEventListener('click', () => { $('#menu').hidden = true; });
-  $('#menu').addEventListener('click', (e) => { if (e.target.id === 'menu') $('#menu').hidden = true; });
-  $('#m-export').addEventListener('click', async () => { await syncSaves(false); exportSave(); });
-  $('#m-touch').addEventListener('click', () => {
-    touchMode = touchMode === 'direct' ? 'pad' : 'direct';
-    try { dosProps && dosProps.setMouseCapture && dosProps.setMouseCapture(touchMode === 'pad'); } catch (_) { /* 무시 */ }
-    $('#m-touch').textContent = touchMode === 'direct' ? '터치 방식: 직접 누르기' : '터치 방식: 트랙패드';
-    toast(touchMode === 'direct' ? '누른 곳을 바로 클릭해요' : '화면을 문질러 커서를 옮기고, 톡 쳐서 클릭해요');
-  });
+  function openMenu() { kbd.blur(); $('#menu').hidden = false; syncSaves(false, true); }
+  function closeMenu() { $('#menu').hidden = true; }
+  $('#btn-menu').addEventListener('click', openMenu);
+  $('#m-close').addEventListener('click', closeMenu);
+  $('#menu').addEventListener('click', (e) => { if (e.target.id === 'menu') closeMenu(); });
+  document.querySelectorAll('[data-send]').forEach((b) => b.addEventListener('click', () => {
+    closeMenu();
+    setTimeout(() => press(KEY[b.dataset.send]), 120);
+  }));
+  $('#m-kbd').addEventListener('click', () => { closeMenu(); openKeyboard(); });
+  $('#m-sync').addEventListener('click', () => syncSaves(true));
+  $('#m-export').addEventListener('click', async () => { await syncSaves(false, true); exportSave(); });
+  $('#m-guide').addEventListener('click', () => { closeMenu(); $('#guide').hidden = false; });
+  $('#guide-ok').addEventListener('click', () => { $('#guide').hidden = true; prefs.guideSeen = 2; savePrefs(); });
+
+  function renderMenuLabels() {
+    $('#m-perf').textContent = '성능: ' + (PERF[prefs.perf] || PERF.normal).label;
+    $('#m-cursor').textContent = '지팡이 커서: ' + (prefs.hideCursor ? '숨김' : '보이기');
+    $('#m-render').textContent = '화면: ' + (prefs.render === 'smooth' ? '부드럽게' : '선명하게');
+    $('#m-dpad').textContent = '방향키 버튼: ' + (prefs.dpad ? '보이기' : '숨김');
+    $('#dpad').hidden = !prefs.dpad;
+    scheduleLayout();
+  }
+  $('#m-dpad').addEventListener('click', () => { prefs.dpad = !prefs.dpad; savePrefs(); renderMenuLabels(); });
+  async function restartWith(change) {
+    if (!confirm('게임을 다시 시작해야 적용돼요. 게임 안에서 저장하지 않은 진행은 사라져요. 바꿀까요?')) return;
+    change();
+    savePrefs();
+    busy('세이브를 보관하고 다시 시작하는 중');
+    await syncSaves(false, true);
+    try { await withTimeout(Promise.resolve(dosProps && dosProps.stop && dosProps.stop()), 3000); } catch (_) { /* 무시 */ }
+    try { sessionStorage.setItem('africa2-autostart', '1'); } catch (_) { /* 무시 */ }
+    location.reload();
+  }
+  $('#m-perf').addEventListener('click', () => restartWith(() => {
+    prefs.perf = PERF_ORDER[(PERF_ORDER.indexOf(prefs.perf) + 1) % PERF_ORDER.length];
+  }));
+  $('#m-cursor').addEventListener('click', () => restartWith(() => { prefs.hideCursor = !prefs.hideCursor; }));
   $('#m-render').addEventListener('click', () => {
-    renderMode = renderMode === 'smooth' ? 'pixelated' : 'smooth';
-    try { dosProps && dosProps.setImageRendering && dosProps.setImageRendering(renderMode); } catch (_) { /* 무시 */ }
-    $('#m-render').textContent = renderMode === 'smooth' ? '화면: 부드럽게' : '화면: 선명하게';
+    prefs.render = prefs.render === 'smooth' ? 'pixelated' : 'smooth';
+    savePrefs();
+    try { dosProps && dosProps.setImageRendering && dosProps.setImageRendering(prefs.render); } catch (_) { /* 무시 */ }
+    renderMenuLabels();
   });
   $('#m-quit').addEventListener('click', async () => {
     busy('세이브를 보관하는 중');
-    await syncSaves(false);
+    await syncSaves(false, true);
     try { await withTimeout(Promise.resolve(dosProps && dosProps.stop && dosProps.stop()), 3000); } catch (_) { /* 무시 */ }
     location.reload();
   });
+  renderMenuLabels();
 
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) syncSaves(false);
+    if (document.hidden) syncSaves(false, true);
     else if (!$('#play').hidden) requestWake();
   });
-  window.addEventListener('pagehide', () => syncSaves(false));
+  window.addEventListener('pagehide', () => syncSaves(false, true));
   document.addEventListener('gesturestart', (e) => e.preventDefault());
   document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
 
@@ -525,6 +815,9 @@
       showError('이 브라우저에서는 저장 공간을 쓸 수 없어요. 개인정보 보호 브라우징을 끄고 다시 열어주세요.');
     }
     renderLauncher();
+    let auto = false;
+    try { auto = sessionStorage.getItem('africa2-autostart') === '1'; sessionStorage.removeItem('africa2-autostart'); } catch (_) { /* 무시 */ }
+    if (auto && state.game) startGame();
   }
   init();
 })();
