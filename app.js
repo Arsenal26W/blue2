@@ -16,7 +16,7 @@
     max: { label: '최대', cycles: 'max' },
   };
   const PERF_ORDER = ['normal', 'light', 'max'];
-  const prefs = Object.assign({ perf: 'normal', hideCursor: true, render: 'smooth', guideSeen: false, enterBar: true, remind: true },
+  const prefs = Object.assign({ perf: 'normal', hideCursor: true, render: 'smooth', guideSeen: false, enterBar: true, remind: true, engine: 'main' },
     (() => { try { return JSON.parse(localStorage.getItem('africa2-prefs') || '{}'); } catch (_) { return {}; } })());
   const savePrefs = () => { try { localStorage.setItem('africa2-prefs', JSON.stringify(prefs)); } catch (_) { /* 무시 */ } };
 
@@ -212,6 +212,7 @@
         rec = { kind: 'files', files: out, root: '', iso: 'CD.ISO', size };
       }
       await idbSet('game', rec);
+      await idbSet('game-meta', metaOf(rec));
       state.game = rec;
       try { await navigator.storage?.persist?.(); } catch (_) { /* 무시 */ }
       toast('게임 파일을 넣었어요');
@@ -224,6 +225,8 @@
       renderLauncher();
     }
   }
+
+  function metaOf(rec) { return { kind: rec.kind, root: rec.root || '', iso: rec.iso, size: rec.size, meta: true }; }
 
   /* ───────── DOSBox 설정 ───────── */
   function q(p) { return /\s/.test(p) ? `"${p}"` : p; }
@@ -239,8 +242,8 @@
       '[dosbox]', 'machine=svga_s3', 'memsize=16', '',
       '[cpu]', 'core=auto', 'cputype=auto', `cycles=${(PERF[prefs.perf] || PERF.normal).cycles}`, 'cycleup=2000', 'cycledown=2000', '',
       '[render]', 'frameskip=0', 'aspect=false', 'scaler=none', '',
-      '[mixer]', 'nosound=false', 'rate=44100', 'blocksize=1024', 'prebuffer=40', '',
-      '[sblaster]', 'sbtype=sb16', 'sbbase=220', 'irq=7', 'dma=1', 'hdma=5', 'oplmode=auto', 'oplrate=44100', '',
+      '[mixer]', 'nosound=false', 'rate=22050', 'blocksize=1024', 'prebuffer=60', '',
+      '[sblaster]', 'sbtype=sb16', 'sbbase=220', 'irq=7', 'dma=1', 'hdma=5', 'oplmode=auto', 'oplrate=22050', '',
       '[speaker]', 'pcspeaker=false', '',
       '[dos]', 'xms=true', 'ems=true', 'umb=true', '',
       '[autoexec]',
@@ -329,11 +332,18 @@
       return;
     }
 
+    if (state.game.meta || state.game.released) {
+      $('#loading-msg').textContent = '게임 파일을 불러오는 중이에요.';
+      const full = await idbGet('game');
+      if (!full) { loadingFail('저장된 게임 파일을 찾지 못했어요. 처음 화면에서 게임 파일을 다시 넣어주세요.'); return; }
+      state.game = full;
+    }
     if (state.game.kind === 'zip' && canUnzip()) {
       $('#loading-msg').textContent = '처음 한 번만 게임 파일을 정리하는 중이에요.';
       try {
         const rec = await unzipGame(state.game.data);
         await idbSet('game', rec);
+        await idbSet('game-meta', metaOf(rec));
         state.game = rec;
       } catch (_) { /* 실패하면 zip 그대로 실행 */ }
     }
@@ -362,6 +372,12 @@
         renderAspect: '4/3',
         imageRendering: prefs.render,
         mouseCapture: false,
+        // '절약' 방식: 에뮬레이터를 화면과 같은 곳에서 돌려 매 장면·소리마다 생기던 데이터 복사를 없앤다
+        workerThread: prefs.engine !== 'main',
+        // 세이브는 이 앱이 직접 관리하므로 실행기 자체 저장 기능은 끈다
+        fsChanges: { local: false },
+        autoSave: false,
+        quickSave: false,
         onEvent: (ev, arg) => { if (ev === 'ci-ready') onCiReady(arg); },
       });
     } catch (e) {
@@ -374,7 +390,7 @@
     clearTimeout(watchdog);
     $('#loading').hidden = true;
     clearInterval(syncTimer);
-    syncTimer = setInterval(() => syncSaves(false), 30000);
+    syncTimer = setInterval(() => syncSaves(false), 60000);
     if (prefs.guideSeen !== 2 && !resumedAfterCrash) $('#guide').hidden = false;
     startSession();
     // 실행기에 넘겨준 게임 파일(약 50MB)을 이쪽 메모리에서 비운다. 실행기 안에는 이미 복사돼 있다.
@@ -385,6 +401,14 @@
         : '앱이 갑자기 꺼져서 다시 열었어요. 게임 안의 불러오기로 이어서 하세요.';
       setTimeout(() => toast(msg, 6000), 1500);
     }
+  }
+
+  /* ───────── 일시정지 (메뉴를 열었거나 다른 앱으로 갔을 때) ───────── */
+  let paused = false;
+  function pauseEmu(p) {
+    if (!ci || paused === p) return;
+    paused = p;
+    try { if (p) ci.pause(); else ci.resume(); } catch (_) { /* 무시 */ }
   }
 
   /* ───────── 메모리 줄이기 ─────────
@@ -427,9 +451,32 @@
     if (session) { session.clean = true; writeSession(); }
     clearInterval(beatTimer);
   }
+  let diagTick = 0;
+  async function collectDiag() {
+    if (!ci || !session) return;
+    const d = { t: Math.round((Date.now() - session.start) / 1000), eng: prefs.engine, perf: prefs.perf };
+    try {
+      if (typeof ci.asyncifyStats === 'function') {
+        const st = await withTimeout(ci.asyncifyStats(), 3000);
+        if (st) d.st = JSON.stringify(st).slice(0, 300);
+      }
+    } catch (_) { /* 무시 */ }
+    try {
+      if (typeof ci.fsTree === 'function') {
+        const tree = await withTimeout(ci.fsTree(), 3000);
+        let total = 0, n = 0;
+        const walk = (node) => { if (!node) return; if (typeof node.size === 'number') { total += node.size; n++; } (node.nodes || []).forEach(walk); };
+        walk(tree);
+        d.fsMB = Math.round(total / 104857.6) / 10; d.files = n;
+      }
+    } catch (_) { /* 무시 */ }
+    session.diag = d;
+    writeSession();
+  }
   function heartbeat() {
     if (!session) return;
     const now = Date.now();
+    if (++diagTick % 3 === 0 && !document.hidden) collectDiag();
     session.beat = now;
     session.vis = document.hidden ? 'hidden' : 'visible';
     writeSession();
@@ -453,7 +500,7 @@
     // 화면을 보던 중에 끊긴 것만 '갑자기 꺼짐'으로 기록 (다른 앱으로 간 사이 닫힌 건 제외)
     if (prev.vis !== 'hidden') {
       const log = readCrashLog();
-      log.push({ at: prev.beat, mins: Math.round((prev.beat - prev.start) / 60000), perf: prefs.perf,
+      log.push({ at: prev.beat, mins: Math.round((prev.beat - prev.start) / 60000), perf: prefs.perf, diag: prev.diag || null,
         os: (navigator.userAgent.match(/OS [\d_]+/) || [''])[0] });
       try { localStorage.setItem(CRASH_KEY, JSON.stringify(log.slice(-10))); } catch (_) { /* 무시 */ }
     }
@@ -823,6 +870,7 @@
   });
 
   /* ───────── 버튼 연결 ───────── */
+  $('#crash-meta').addEventListener('click', () => { $('#crash-diag').hidden = !$('#crash-diag').hidden; });
   $('#btn-pick').addEventListener('click', () => $('#pick-game').click());
   $('#btn-repick').addEventListener('click', () => $('#pick-game').click());
   $('#pick-game').addEventListener('change', (e) => { importGame(e.target.files); e.target.value = ''; });
@@ -831,8 +879,8 @@
   $('#btn-import').addEventListener('click', () => $('#pick-save').click());
   $('#pick-save').addEventListener('change', (e) => { importSave(e.target.files[0]); e.target.value = ''; });
 
-  function openMenu() { $('#menu').hidden = false; syncSaves(false, true); }
-  function closeMenu() { $('#menu').hidden = true; }
+  function openMenu() { $('#menu').hidden = false; pauseEmu(true); syncSaves(false, true); }
+  function closeMenu() { $('#menu').hidden = true; if (!document.hidden) pauseEmu(false); }
   $('#btn-menu').addEventListener('click', openMenu);
   $('#m-close').addEventListener('click', closeMenu);
   $('#menu').addEventListener('click', (e) => { if (e.target.id === 'menu') closeMenu(); });
@@ -847,10 +895,12 @@
     $('#m-render').textContent = '화면: ' + (prefs.render === 'smooth' ? '부드럽게' : '선명하게');
     $('#m-enter').textContent = '엔터 바: ' + (prefs.enterBar ? '보이기' : '숨김');
     $('#m-remind').textContent = '저장 알림: ' + (prefs.remind ? '켬' : '끔');
+    $('#m-engine').textContent = '실행 방식: ' + (prefs.engine === 'main' ? '절약' : '일반');
     $('#bar-enter').hidden = !prefs.enterBar;
   }
   $('#m-enter').addEventListener('click', () => { prefs.enterBar = !prefs.enterBar; savePrefs(); renderMenuLabels(); });
   $('#m-remind').addEventListener('click', () => { prefs.remind = !prefs.remind; savePrefs(); renderMenuLabels(); });
+  $('#m-engine').addEventListener('click', () => restartWith(() => { prefs.engine = prefs.engine === 'main' ? 'worker' : 'main'; }));
 
   // 돌린 화면에서도 똑바로 보이도록 기본 확인창 대신 직접 만든 확인창 사용
   function askConfirm(msg) {
@@ -895,7 +945,8 @@
 
   document.addEventListener('visibilitychange', () => {
     if (session) { session.vis = document.hidden ? 'hidden' : 'visible'; session.beat = Date.now(); writeSession(); }
-    if (document.hidden) syncSaves(false, true);
+    if (document.hidden) { pauseEmu(true); syncSaves(false, true); }
+    else if ($('#menu').hidden) pauseEmu(false);
     else if (!$('#play').hidden) requestWake();
   });
   window.addEventListener('pagehide', () => syncSaves(false, true));
@@ -914,13 +965,22 @@
     const log = readCrashLog();
     const last = log[log.length - 1];
     $('#crash-meta').hidden = !last;
-    if (last) $('#crash-meta').textContent = `최근 갑자기 꺼짐: ${fmtTime(last.at)}, 게임 ${last.mins}분째 (지금까지 ${log.length}번)`;
+    if (last) {
+      $('#crash-meta').textContent = `최근 갑자기 꺼짐: ${fmtTime(last.at)}, 게임 ${last.mins}분째 (지금까지 ${log.length}번)`;
+      $('#crash-diag').textContent = log.slice(-3).reverse().map((c) =>
+        `${fmtTime(c.at)} ${c.mins}분 성능:${c.perf}` + (c.diag ? ` 방식:${c.diag.eng} 파일:${c.diag.fsMB}MB/${c.diag.files}개 ${c.diag.st || ''}` : '')).join('\n');
+    } else $('#crash-diag').hidden = true;
     $('#tip-home').hidden = !(isIOS() && !isStandalone());
   }
 
   async function init() {
     try {
-      state.game = (await idbGet('game')) || null;
+      // 시작 화면에서는 50MB 게임 파일을 메모리에 올리지 않고 요약 정보만 읽는다
+      state.game = (await idbGet('game-meta')) || null;
+      if (!state.game) {
+        const full = await idbGet('game');
+        if (full) { state.game = metaOf(full); try { await idbSet('game-meta', state.game); } catch (_) { /* 무시 */ } }
+      }
       const s = await idbGet('saves');
       if (s) state.saves = { files: s.files || {}, zip: s.zip || null, updated: s.updated || 0 };
     } catch (e) {
@@ -931,7 +991,9 @@
     try { auto = sessionStorage.getItem('africa2-autostart') === '1'; sessionStorage.removeItem('africa2-autostart'); } catch (_) { /* 무시 */ }
     const crashed = checkLastSession();
     renderLauncher();
-    if (crashed && state.game) { resumedAfterCrash = true; auto = true; }
+    if (crashed && state.game && lastEnd && lastEnd.vis !== 'hidden') {
+      toast('게임이 갑자기 꺼졌어요. 게임 시작 → 게임 안의 불러오기로 이어서 하세요.', 6000);
+    }
     if (auto && state.game) startGame();
   }
   init();
