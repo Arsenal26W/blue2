@@ -494,6 +494,26 @@
      세로로 들고 있으면 앱 전체를 시계 방향으로 90도 돌린다(회전 잠금을 켜둬도 가로로 보임). */
   const appEl = $('#app');
   let rotated = false;
+  // 세로로 들었을 때도 '진짜 가로 화면'과 똑같은 여백을 쓰기 위해, 가로일 때 잰 여백을 기억해둔다.
+  function readInsets() {
+    const cs = getComputedStyle($('#inset-probe'));
+    return { t: parseFloat(cs.paddingTop) || 0, r: parseFloat(cs.paddingRight) || 0,
+      b: parseFloat(cs.paddingBottom) || 0, l: parseFloat(cs.paddingLeft) || 0 };
+  }
+  function landscapeInsets() {
+    const now = readInsets();
+    if (!rotated) {
+      if (now.l || now.r || now.b) { try { localStorage.setItem('africa2-land-insets', JSON.stringify(now)); } catch (_) { /* 무시 */ } }
+      return now;
+    }
+    try {
+      const saved = JSON.parse(localStorage.getItem('africa2-land-insets') || 'null');
+      if (saved) return saved;
+    } catch (_) { /* 무시 */ }
+    // 아직 가로로 연 적이 없으면 세로 여백으로 가로 여백을 짐작 (다이나믹 아일랜드 폭을 양옆에, 홈 바 자리 21pt를 아래에)
+    const side = Math.max(now.t, now.b, now.l, now.r);
+    return { t: 0, r: side, b: now.b > 0 ? 21 : 0, l: side };
+  }
   function applyOrientation() {
     const W = window.innerWidth, H = window.innerHeight;
     rotated = H > W;
@@ -501,6 +521,13 @@
     appEl.style.width = (rotated ? H : W) + 'px';
     appEl.style.height = (rotated ? W : H) + 'px';
     appEl.style.transform = rotated ? `translateX(${W}px) rotate(90deg)` : 'none';
+    const ins = landscapeInsets();
+    // 가로 화면은 왼쪽·오른쪽 여백이 같으므로 큰 쪽으로 맞춤 → 어느 방향으로 들어도 같은 모습
+    const side = Math.max(ins.l, ins.r);
+    appEl.style.setProperty('--pt', ins.t + 'px');
+    appEl.style.setProperty('--pb', ins.b + 'px');
+    appEl.style.setProperty('--pl', side + 'px');
+    appEl.style.setProperty('--pr', side + 'px');
   }
 
   /* ───────── 화면 맞춤 (4:3, 안전 영역 안쪽) ───────── */

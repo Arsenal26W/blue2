@@ -71,7 +71,9 @@
     container-type: size;
     --pt: var(--sat); --pr: var(--sar); --pb: var(--sab); --pl: var(--sal);
   }
-  #app.rotated { --pl: var(--sat); --pr: var(--sab); --pt: var(--sar); --pb: var(--sal); }
+  /* 실제 여백값 측정용 (app.js가 읽음) */
+  #inset-probe { position: fixed; visibility: hidden; pointer-events: none; width: 0; height: 0;
+    padding: var(--sat) var(--sar) var(--sab) var(--sal); }
 
   /* ───────── 시작 화면 ───────── */
   #launcher {
@@ -142,7 +144,7 @@
   #loading .btn { margin-top: 8px; font-size: 17px; }
 
   .side { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; align-self: stretch; padding-bottom: var(--pb); }
-  .side.left { grid-area: left; }
+  .side.left { grid-area: left; justify-content: flex-end; padding-bottom: 8px; gap: 10px; }
   .side.right { grid-area: right; gap: 22px; }
 
   .pad-btn {
@@ -167,7 +169,7 @@
   .dpad .right { grid-area: right; } .dpad .right::after { border-left: 10px solid var(--bone); border-right-width: 0; }
 
   @container (max-height: 360px) {
-    .side.left { gap: 10px; }
+    .side.left { gap: 8px; }
     .dpad { grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px); }
     .bar { width: 108px; height: 40px; }
   }
@@ -310,6 +312,7 @@
 <div id="toast" role="status" aria-live="polite"></div>
 <div id="busy" hidden></div>
 </div>
+<div id="inset-probe" aria-hidden="true"></div>
 <input type="file" id="pick-game" multiple hidden>
 <input type="file" id="pick-save" hidden>
 
