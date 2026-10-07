@@ -16,7 +16,7 @@
     max: { label: '최대', cycles: 'max' },
   };
   const PERF_ORDER = ['normal', 'light', 'max'];
-  const prefs = Object.assign({ perf: 'normal', hideCursor: true, render: 'smooth', guideSeen: false, dpad: false },
+  const prefs = Object.assign({ perf: 'normal', hideCursor: true, render: 'smooth', guideSeen: false, enterBar: true },
     (() => { try { return JSON.parse(localStorage.getItem('africa2-prefs') || '{}'); } catch (_) { return {}; } })());
   const savePrefs = () => { try { localStorage.setItem('africa2-prefs', JSON.stringify(prefs)); } catch (_) { /* 무시 */ } };
 
@@ -490,32 +490,46 @@
     }
   }
 
+  /* ───────── 항상 가로 화면 ─────────
+     세로로 들고 있으면 앱 전체를 시계 방향으로 90도 돌린다(회전 잠금을 켜둬도 가로로 보임). */
+  const appEl = $('#app');
+  let rotated = false;
+  function applyOrientation() {
+    const W = window.innerWidth, H = window.innerHeight;
+    rotated = H > W;
+    appEl.classList.toggle('rotated', rotated);
+    appEl.style.width = (rotated ? H : W) + 'px';
+    appEl.style.height = (rotated ? W : H) + 'px';
+    appEl.style.transform = rotated ? `translateX(${W}px) rotate(90deg)` : 'none';
+  }
+
   /* ───────── 화면 맞춤 (4:3, 안전 영역 안쪽) ───────── */
+  const LEFT_MIN = 132;  // 방향키·스페이스·엔터 칸
+  const RIGHT_MIN = 74;  // ESC·메뉴 칸
   function layout() {
     if ($('#play').hidden) return;
     const stage = $('#stage');
-    const r = stage.getBoundingClientRect();
-    const W = r.width, H = r.height;
-    const portrait = H > W;
-    stage.classList.toggle('portrait', portrait);
-    let h;
-    if (!portrait) {
-      const side = H < 340 ? 64 : 74; // 양옆 버튼 칸 최소 폭
-      h = Math.min(H, ((W - side * 2) * 3) / 4);
-    } else {
-      const bar = 110;
-      h = Math.min((W * 3) / 4, H - bar);
-    }
-    h = Math.max(120, Math.floor(h / 3) * 3);
+    const W = stage.clientWidth, H = stage.clientHeight;
+    // 높이를 꽉 채우는 게 우선. 양옆 버튼 칸이 모자랄 때만 줄인다.
+    let h = Math.min(H, ((W - LEFT_MIN - RIGHT_MIN) * 3) / 4);
+    h = Math.max(120, Math.floor(h));
+    const w = Math.floor((h * 4) / 3);
+    // 남는 폭은 왼쪽 칸에 더 많이(7:3) 줘서 게임이 살짝 오른쪽으로 가게
+    const extra = Math.max(0, W - w - LEFT_MIN - RIGHT_MIN);
+    const left = LEFT_MIN + Math.round(extra * 0.7);
+    const right = Math.max(0, W - w - left);
+    stage.style.gridTemplateColumns = `${left}px ${w}px ${right}px`;
     const g = $('#game');
-    g.style.width = (h / 3) * 4 + 'px';
+    g.style.width = w + 'px';
     g.style.height = h + 'px';
   }
   let layoutRaf = 0;
-  function scheduleLayout() { cancelAnimationFrame(layoutRaf); layoutRaf = requestAnimationFrame(() => { layout(); setTimeout(layout, 300); }); }
+  function relayout() { applyOrientation(); layout(); }
+  function scheduleLayout() { cancelAnimationFrame(layoutRaf); layoutRaf = requestAnimationFrame(() => { relayout(); setTimeout(relayout, 300); }); }
   window.addEventListener('resize', scheduleLayout);
   window.addEventListener('orientationchange', scheduleLayout);
   if (window.visualViewport) window.visualViewport.addEventListener('resize', scheduleLayout);
+  applyOrientation();
 
   /* ───────── 화면 꺼짐 방지 ───────── */
   async function requestWake() {
@@ -536,72 +550,21 @@
       }
     } catch (_) { /* 무시 */ }
   }
-  const charQueue = [];
-  let charBusy = false;
-  async function pumpChars() {
-    if (charBusy) return;
-    charBusy = true;
-    while (charQueue.length) {
-      const m = charToKey(charQueue.shift());
-      if (m) press(m.code, m.shift);
-      await sleep(60);
-    }
-    charBusy = false;
-  }
-  function charToKey(ch) {
-    if (/[a-z]/.test(ch)) return { code: ch.toUpperCase().charCodeAt(0) };
-    if (/[A-Z]/.test(ch)) return { code: ch.charCodeAt(0), shift: true };
-    if (/[0-9]/.test(ch)) return { code: ch.charCodeAt(0) };
-    const map = { ' ': 32, '-': 45, '.': 46, ',': 44, '/': 47, ';': 59, '=': 61, "'": 39, '[': 91, ']': 93, '\\': 92, '`': 96 };
-    return map[ch] !== undefined ? { code: map[ch] } : null;
-  }
-
   function wakeAudio() {
     const list = window.__audioCtxs || [];
     for (const c of list) { try { if (c.state !== 'running') c.resume(); } catch (_) { /* 무시 */ } }
   }
 
-  document.querySelectorAll('.key[data-key]').forEach((b) => {
+  document.querySelectorAll('#stage [data-key]').forEach((b) => {
     b.addEventListener('pointerdown', (e) => { e.preventDefault(); wakeAudio(); b.classList.add('on'); press(KEY[b.dataset.key]); });
     const off = () => b.classList.remove('on');
     b.addEventListener('pointerup', off); b.addEventListener('pointercancel', off); b.addEventListener('pointerleave', off);
   });
 
-  const kbd = $('#kbd');
-  function openKeyboard() { kbd.value = ''; kbd.focus(); }
-  kbd.addEventListener('keydown', (e) => {
-    const special = { Enter: KEY.enter, Backspace: KEY.backspace, Escape: KEY.esc, Tab: KEY.tab,
-      ArrowUp: KEY.up, ArrowDown: KEY.down, ArrowLeft: KEY.left, ArrowRight: KEY.right };
-    if (special[e.key] !== undefined) { e.preventDefault(); press(special[e.key]); }
-  });
-  kbd.addEventListener('input', () => {
-    const v = kbd.value; kbd.value = '';
-    for (const ch of v) charQueue.push(ch);
-    pumpChars();
-  });
-
-  /* ───────── 진동(햅틱) ─────────
-     아이폰 Safari에는 진동 기능이 따로 없어서, iOS 18부터 생긴 '스위치' 체크박스를 눌렀을 때의 진동을 빌려 쓴다. */
-  function haptic() {
-    try { if (typeof navigator.vibrate === 'function' && navigator.vibrate(10)) return; } catch (_) { /* 무시 */ }
-    try {
-      const label = document.createElement('label');
-      label.setAttribute('aria-hidden', 'true');
-      label.style.display = 'none';
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.setAttribute('switch', '');
-      label.appendChild(input);
-      document.head.appendChild(label);
-      label.click();
-      document.head.removeChild(label);
-    } catch (_) { /* 무시 */ }
-  }
-
   /* ───────── 터치 → 마우스 ─────────
      톡: 그 자리로 커서를 옮겨 잠깐 머문 뒤 클릭 (게임이 위치를 먼저 알아채도록)
      누른 채 끌기: 커서가 손가락을 따라가고, 손을 뗀 곳을 클릭
-     꾹: 스페이스(선택) + 진동 / 두 손가락 톡: ESC */
+     꾹: 스페이스(선택) / 두 손가락 톡: ESC */
   const pad = $('#pad');
   const game = $('#game');
   const TAP_SLOP = 14;     // 이만큼 넘게 움직이면 '끌기'
@@ -616,11 +579,11 @@
 
   function normPos(cx, cy) {
     const r = game.getBoundingClientRect();
-    return {
-      x: Math.min(1, Math.max(0, (cx - r.left) / r.width)),
-      y: Math.min(1, Math.max(0, (cy - r.top) / r.height)),
-      px: cx - r.left, py: cy - r.top,
-    };
+    let x, y;
+    if (rotated) { x = (cy - r.top) / r.height; y = (r.right - cx) / r.width; }
+    else { x = (cx - r.left) / r.width; y = (cy - r.top) / r.height; }
+    x = Math.min(1, Math.max(0, x)); y = Math.min(1, Math.max(0, y));
+    return { x, y, px: x * game.offsetWidth, py: y * game.offsetHeight };
   }
   function moveMouse(p) {
     try {
@@ -667,7 +630,6 @@
     gesture.holdTimer = setTimeout(() => {
       if (gesture && !gesture.dragging && !gesture.multi && !gesture.done) {
         gesture.done = true;
-        haptic();
         press(KEY.space);
         mark(gesture.start, 'hold');
       }
@@ -711,7 +673,7 @@
   pad.addEventListener('pointercancel', (e) => endPointer(e, true));
   pad.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  /* ───────── 방향키 버튼 (메뉴에서 켜는 예비용) ───────── */
+  /* ───────── 방향키 버튼 (누르고 있으면 반복) ───────── */
   document.querySelectorAll('.dpad [data-arrow]').forEach((b) => {
     let rep = 0, first = 0;
     const stop = () => { clearTimeout(first); clearInterval(rep); b.classList.remove('on'); };
@@ -734,16 +696,11 @@
   $('#btn-import').addEventListener('click', () => $('#pick-save').click());
   $('#pick-save').addEventListener('change', (e) => { importSave(e.target.files[0]); e.target.value = ''; });
 
-  function openMenu() { kbd.blur(); $('#menu').hidden = false; syncSaves(false, true); }
+  function openMenu() { $('#menu').hidden = false; syncSaves(false, true); }
   function closeMenu() { $('#menu').hidden = true; }
   $('#btn-menu').addEventListener('click', openMenu);
   $('#m-close').addEventListener('click', closeMenu);
   $('#menu').addEventListener('click', (e) => { if (e.target.id === 'menu') closeMenu(); });
-  document.querySelectorAll('[data-send]').forEach((b) => b.addEventListener('click', () => {
-    closeMenu();
-    setTimeout(() => press(KEY[b.dataset.send]), 120);
-  }));
-  $('#m-kbd').addEventListener('click', () => { closeMenu(); openKeyboard(); });
   $('#m-sync').addEventListener('click', () => syncSaves(true));
   $('#m-export').addEventListener('click', async () => { await syncSaves(false, true); exportSave(); });
   $('#m-guide').addEventListener('click', () => { closeMenu(); $('#guide').hidden = false; });
@@ -753,13 +710,24 @@
     $('#m-perf').textContent = '성능: ' + (PERF[prefs.perf] || PERF.normal).label;
     $('#m-cursor').textContent = '지팡이 커서: ' + (prefs.hideCursor ? '숨김' : '보이기');
     $('#m-render').textContent = '화면: ' + (prefs.render === 'smooth' ? '부드럽게' : '선명하게');
-    $('#m-dpad').textContent = '방향키 버튼: ' + (prefs.dpad ? '보이기' : '숨김');
-    $('#dpad').hidden = !prefs.dpad;
-    scheduleLayout();
+    $('#m-enter').textContent = '엔터 바: ' + (prefs.enterBar ? '보이기' : '숨김');
+    $('#bar-enter').hidden = !prefs.enterBar;
   }
-  $('#m-dpad').addEventListener('click', () => { prefs.dpad = !prefs.dpad; savePrefs(); renderMenuLabels(); });
+  $('#m-enter').addEventListener('click', () => { prefs.enterBar = !prefs.enterBar; savePrefs(); renderMenuLabels(); });
+
+  // 돌린 화면에서도 똑바로 보이도록 기본 확인창 대신 직접 만든 확인창 사용
+  function askConfirm(msg) {
+    return new Promise((resolve) => {
+      $('#confirm-msg').textContent = msg;
+      $('#confirm').hidden = false;
+      const done = (v) => { $('#confirm').hidden = true; yes.removeEventListener('click', onYes); no.removeEventListener('click', onNo); resolve(v); };
+      const yes = $('#confirm-yes'), no = $('#confirm-no');
+      const onYes = () => done(true), onNo = () => done(false);
+      yes.addEventListener('click', onYes); no.addEventListener('click', onNo);
+    });
+  }
   async function restartWith(change) {
-    if (!confirm('게임을 다시 시작해야 적용돼요. 게임 안에서 저장하지 않은 진행은 사라져요. 바꿀까요?')) return;
+    if (!(await askConfirm('게임을 다시 시작해야 적용돼요. 게임 안에서 저장하지 않은 진행은 사라져요. 바꿀까요?'))) return;
     change();
     savePrefs();
     busy('세이브를 보관하고 다시 시작하는 중');
